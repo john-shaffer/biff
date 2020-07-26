@@ -8,25 +8,25 @@
     [clojure.string :as str]
     [clojure.java.io :as io]
     [clojure.spec.alpha :as s]
-    [crux.api :as crux]
+    [datomic.client.api :as d]
     [expound.alpha :as expound]
     [taoensso.sente :as sente]
     [ring.middleware.session.cookie :as cookie]
     [ring.middleware.anti-forgery :as anti-forgery]
     [rum.core :as rum]
     [taoensso.sente.server-adapters.immutant :refer [get-sch-adapter]]
-    [biff.crux :as bcrux]
+    [biff.datomic :as bdat]
     [taoensso.timbre :refer [log spy]]
     [trident.util :as u])
   (:import
     [java.nio.file Paths]))
 
-(defn wrap-env [handler {:keys [biff/node] :as sys}]
+(defn wrap-env [handler {:keys [biff/db-conn] :as sys}]
   (comp handler
     (fn [event-or-request]
       (let [req (:ring-req event-or-request event-or-request)]
         (-> (merge sys event-or-request)
-          (assoc :biff/db (crux/db node))
+          (assoc :biff/db (d/db db-conn))
           (merge (u/prepend-keys "session" (get req :session)))
           (merge (u/prepend-keys "params" (get req :params))))))))
 
@@ -41,9 +41,7 @@
         root (or root (str "www/" host))
         root-dev (if dev "www-dev" root-dev)]
     (merge
-      {:biff.crux/topology :jdbc
-       :biff.crux/storage-dir (str "data/" app-ns "/crux-db")
-       :biff.web/port 8080
+      {:biff.web/port 8080
        :biff.static/root root
        :biff.static/resource-root (str "www/" app-ns)
        :biff.handler/secure-defaults true
@@ -58,23 +56,18 @@
                         (str "http://localhost:" port)
                         (str "https://" host))}
       (when dev
-        {:biff.crux/topology :standalone
-         :biff.handler/secure-defaults false}))))
+        {:biff.handler/secure-defaults false}))))
 
 (defn check-config [sys]
   (when-not (contains? sys :biff/host)
     (throw (ex-info ":biff/host not set. Do you need to add or update config.edn?" {})))
   sys)
 
-(defn start-crux [sys]
-  (let [opts (-> sys
-               (u/select-ns-as 'biff.crux 'crux)
-               (set/rename-keys {:crux/topology :topology
-                                 :crux/storage-dir :storage-dir}))
-        node (bcrux/start-node opts)]
+(defn start-db-conn [sys]
+  (let [db-conn (bdat/start-db-conn (:biff.datomic/client sys)
+                  (:biff.datomic/db-name sys))]
     (-> sys
-      (assoc :biff/node node)
-      (update :sys/stop conj #(.close node)))))
+      (assoc :biff/db-conn db-conn))))
 
 (defn start-sente [sys]
   (let [{:keys [ch-recv send-fn connected-uids
@@ -103,22 +96,20 @@
         :biff.sente/ch-recv ch-recv
         :biff.sente/connected-uids connected-uids))))
 
-(defn start-tx-listener [{:keys [biff/node biff.sente/connected-uids] :as sys}]
-  (let [last-tx-id (bcrux/with-tx-log [log {:node node}]
-                     (atom (:crux.tx/tx-id (last log))))
+(defn start-tx-listener [{:keys [biff/db-conn biff.sente/connected-uids] :as sys}]
+  (let [last-tx-id (-> db-conn d/db :basisT atom)
         subscriptions (atom {})
-        sys (assoc sys :biff.crux/subscriptions subscriptions)
+        sys (assoc sys :biff.datomic/subscriptions subscriptions)
         notify-tx-opts (-> sys
                          (merge (u/select-ns-as sys 'biff nil))
                          (assoc :last-tx-id last-tx-id))
-        listener (crux/listen node {:crux/event-type :crux/indexed-tx}
-                   (fn [ev] (bcrux/notify-tx notify-tx-opts)))]
+        listener (bdat/listener #(bdat/notify-tx notify-tx-opts))]
     (add-watch connected-uids ::rm-subs
       (fn [_ _ old-uids new-uids]
         (let [disconnected (set/difference (:any old-uids) (:any new-uids))]
           (when (not-empty disconnected)
             (apply swap! subscriptions dissoc disconnected)))))
-    (update sys :sys/stop conj #(.close listener))))
+    (update sys :sys/stop conj #(.stop listener))))
 
 (defn wrap-event-handler [handler]
   (fn [{:keys [?reply-fn] :as event}]
@@ -136,8 +127,8 @@
   (update sys :sys/stop conj
     (sente/start-server-chsk-router! ch-recv
       (-> event-handler
-        bcrux/wrap-sub
-        bcrux/wrap-tx
+        bdat/wrap-sub
+        bdat/wrap-tx
         (wrap-env sys)
         wrap-event-handler)
       {:simple-auto-threading? true})))
@@ -145,13 +136,13 @@
 (defn set-auth-route [sys]
   (update sys :biff/routes conj (auth/route sys)))
 
-(defn set-handler [{:biff/keys [routes host node]
+(defn set-handler [{:biff/keys [routes host db-conn]
                     :biff.handler/keys [roots
                                         secure-defaults
                                         not-found-path] :as sys}]
   (let [cookie-key (bt/decode (auth/get-key (assoc sys
                                               :k :cookie-key
-                                              :biff/db (crux/db node)))
+                                              :biff/db (d/db db-conn)))
                      :base64)
         session-store (cookie/cookie-store {:key cookie-key})
         handler (http/make-handler
@@ -199,7 +190,7 @@
     (let [new-sys (-> sys
                     (set-defaults app-ns)
                     check-config
-                    start-crux
+                    start-db-conn
                     start-sente
                     start-tx-listener
                     start-event-router

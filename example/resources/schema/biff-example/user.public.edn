@@ -1,0 +1,5 @@
+[
+ #:db{:ident :user.public/display-name
+      :valueType :db.type/string
+      :cardinality :db.cardinality/one}
+ ]

@@ -2,7 +2,7 @@
   (:require
     [trident.util :as u]
     [clojure.spec.alpha :as s]
-    [crux.api :as crux]
+    [datomic.client.api :as d]
     [example.logic :as logic]))
 
 (defmulti api :id)
@@ -13,7 +13,7 @@
 
 (defmethod api :example/move
   [{:keys [biff/node biff/db session/uid] :as sys} {:keys [game-id location]}]
-  (let [{:keys [board users x o] :as game} (crux/entity db {:game/id game-id})
+  (let [{:keys [board users x o] :as game} (/ 1 0)#_(crux/entity db {:game/id game-id})
         current-player (logic/current-player game)
         new-game (assoc-in game [:board location] current-player)
         allowed (and
@@ -22,14 +22,14 @@
                   (not (contains? board location))
                   (s/valid? :example.rules/location location))]
     (when allowed
-      (crux/submit-tx node
-        [[:crux.tx/match {:game/id game-id} game]
-         [:crux.tx/put new-game]])
+      (/ 1 0)#_(crux/submit-tx node
+          [[:crux.tx/match {:game/id game-id} game]
+           [:crux.tx/put new-game]])
       nil)))
 
 (defmethod api :example/new-game
   [{:keys [biff/node biff/db session/uid] :as sys} {:keys [game-id]}]
-  (let [{:keys [board users x o] :as game} (crux/entity db {:game/id game-id})
+  (let [{:keys [board users x o] :as game} (/ 1 0)#_(crux/entity db {:game/id game-id})
         new-game (-> game
                    (dissoc :board)
                    (assoc :x o :o x))
@@ -37,9 +37,9 @@
                   (logic/game-over? game)
                   (#{x o} uid))]
     (when allowed
-      (crux/submit-tx node
-        [[:crux.tx/match {:game/id game-id} game]
-         [:crux.tx/put new-game]])
+      (/ 1 0)#_(crux/submit-tx node
+          [[:crux.tx/match {:game/id game-id} game]
+           [:crux.tx/put new-game]])
       nil)))
 
 (defmethod api :example/echo

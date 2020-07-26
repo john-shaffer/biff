@@ -23,24 +23,22 @@
 (defn set-display-name [display-name]
   (api-send
     [:biff/tx
-     {[:public-users {:user.public/id @db/uid}]
-      {:db/merge true
-       :display-name (or (not-empty display-name) :db/remove)}}]))
+     [{:db/id @db/uid
+       :user.public/display-name (str display-name)}]]))
 
 (defn set-game-id [game-id]
-  (when (not= game-id @db/game-id)
-    (api-send
-      [:biff/tx
-       (cond-> {}
-         (not-empty @db/game-id)
-         (assoc [:games {:game/id @db/game-id}]
-           {:db/update true
-            :users [:db/disj @db/uid]})
+  (let [old-id @db/game-id
+        uid @db/uid]
+    (when (not= game-id old-id)
+      (api-send
+        [:biff/tx
+         (cond-> []
+           (not-empty old-id)
+           (conj [:db/retract [:biff-example.game/id old-id]
+                  :biff-example.game/users uid])
 
-         (not-empty game-id)
-         (assoc [:games {:game/id game-id}]
-           {:db/merge true
-            :users [:db/union @db/uid]}))])))
+           (not-empty game-id)
+           (conj #:biff-example.game{:id game-id :users [uid]}))]))))
 
 (defn move [location]
   (api-send [:example/move {:game-id @db/game-id :location location}]))

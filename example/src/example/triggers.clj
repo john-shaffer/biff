@@ -1,6 +1,6 @@
 (ns example.triggers
   (:require
-    [crux.api :as crux]
+    [datomic.client.api :as d]
     [trident.util :as u]))
 
 (defn assign-players [{:keys [biff/node doc]
@@ -21,9 +21,9 @@
              (empty? users) [:crux.tx/delete (:crux.db/id doc)]
              (not= doc new-doc) [:crux.tx/put new-doc])]
     (when op
-      (crux/submit-tx node
-        [[:crux.tx/match (some :crux.db/id [doc new-doc]) doc]
-         op]))))
+      (/ 1 0)#_(crux/submit-tx node
+          [[:crux.tx/match (some :crux.db/id [doc new-doc]) doc]
+           op]))))
 
 (def triggers
   {:games {[:create :update] assign-players}})

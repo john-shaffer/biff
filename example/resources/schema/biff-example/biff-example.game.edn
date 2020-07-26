@@ -1,0 +1,10 @@
+[
+ #:db{:ident :biff-example.game/id
+      :valueType :db.type/string
+      :cardinality :db.cardinality/one
+      :unique :db.unique/identity}
+
+ #:db{:ident :biff-example.game/users
+      :valueType :db.type/ref
+      :cardinality :db.cardinality/many}
+ ]

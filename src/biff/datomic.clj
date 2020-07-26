@@ -1,91 +1,30 @@
-(ns biff.crux
+(ns biff.datomic
   (:require
     [clojure.core.async :refer [go <!!]]
+    [clojure.edn :as edn]
     [clojure.java.io :as io]
     [clojure.spec.alpha :as s]
     [clojure.walk :as walk]
     [clojure.set :as set]
-    [crux.api :as crux]
+    [datomic.client.api :as d]
     [expound.alpha :refer [expound]]
     [taoensso.timbre :refer [log spy]]
     [trident.util :as u]))
 
-(defn start-node ^crux.api.ICruxAPI [{:keys [topology storage-dir]
-                                      :or {topology :standalone} :as opts}]
-  (let [opts (merge
-               {:crux.kv/db-dir (str (io/file storage-dir "db"))}
-               (case topology
-                 :standalone {:crux.node/topology '[crux.standalone/topology crux.kv.rocksdb/kv-store]
-                              :crux.standalone/event-log-dir (str (io/file storage-dir "eventlog"))
-                              :crux.standalone/event-log-kv-store 'crux.kv.rocksdb/kv}
-                 :jdbc (merge
-                         {:crux.node/topology '[crux.jdbc/topology crux.kv.rocksdb/kv-store]
-                          :crux.jdbc/dbtype "postgresql"}
-                         (u/select-ns opts 'crux.jdbc))))]
-    (crux/start-node opts)))
+(defn start-db-conn [client-args db-name]
+  (let [client (d/client client-args)]
+    (d/create-database client {:db-name db-name})
+    (d/connect client {:db-name db-name})))
 
 (u/sdefs
   ::ident (s/cat :table keyword? :id (s/? any?))
   ::tx (s/coll-of (s/tuple ::ident (s/nilable map?))))
 
-(defn prep-doc [{:biff/keys [db rules]}
-                [[table id] {merge-doc :db/merge update-doc :db/update :as doc}]]
-  (let [generated-id (nil? id)
-        merge-update (or merge-doc update-doc)
-        id' (or id (java.util.UUID/randomUUID))
-        old-doc (crux/entity db id')
-        doc' (cond->> doc
-               merge-update (merge old-doc))
-        doc'' (when (some? doc')
-                (->>
-                  (when (map? id') (keys id'))
-                  (concat [:db/merge :db/update :crux.db/id])
-                  (apply dissoc doc')
-                  (remove (comp #{:db/remove} second))
-                  (map (fn [[k v]]
-                         [k (if (and (vector? v) (#{:db/union :db/disj} (first v)))
-                              (let [[op x] v
-                                    old-xs (get old-doc k)]
-                                (case op
-                                  :db/union ((fnil conj #{}) old-xs x)
-                                  :db/disj ((fnil disj #{}) old-xs x)))
-                              v)]))
-                  (into {})))]
-    (cond
-      (and generated-id merge-update)
-      (u/anom :incorrect "Attempted to merge or update on a new document."
-        :doc doc
-        :ident [table id])
-
-      (and update-doc (nil? old-doc))
-      (u/anom :incorrect "Attempted to update on a new document."
-        :doc doc
-        :ident [table id'])
-
-      (and (some? doc'')
-        (some not
-          (map s/valid?
-            (get-in rules [table :spec])
-            [id' doc''])))
-      (u/anom :incorrect "Document doesn't meet spec."
-        :doc doc
-        :ident [table id'])
-
-      :default
-      [[table id'] {:table table
-                    :id id'
-                    :generated-id generated-id
-                    :old-doc old-doc
-                    :doc (cond-> (assoc doc'' :crux.db/id id')
-                           (map? id') (merge id'))
-                    :op (cond
-                          (nil? doc'') :delete
-                          (nil? old-doc) :create
-                          :default :update)}])))
-
 (defn authorize-write [{:keys [biff/rules admin] :as env}
                        {:keys [table op] :as doc-tx-data}]
-  (if admin
+  (prn "TODO: biff.datomic/authorize-write")
+  doc-tx-data
+  #_(if admin
     doc-tx-data
     (u/letdelay [auth-fn (get-in rules [table op])
                  result (auth-fn (merge env doc-tx-data))
@@ -98,7 +37,9 @@
 
 (defn authorize-tx [{:keys [tx current-time] :as env
                      :or {current-time (java.util.Date.)}}]
-  (if-not (s/valid? ::tx tx)
+  (prn "TODO: biff.datomic/authorize-tx")
+  tx
+  #_(if-not (s/valid? ::tx tx)
     (u/anom :incorrect "Invalid transaction shape."
       :tx tx)
     (u/letdelay [tx* (->> tx
@@ -197,7 +138,9 @@
     (and id-valid? doc-valid?)))
 
 (defn authorize-read [{:keys [table doc query biff/rules] :as env}]
-  (let [query-type (if (contains? query :id)
+  (prn "TODO: biff.datomic/authorize-read")
+  doc
+  #_(let [query-type (if (contains? query :id)
                      :get
                      :query)
         auth-fn (get-in rules [table query-type])
@@ -216,7 +159,7 @@
         :table table)
       doc)))
 
-(defn crux-resubscribe*
+(defn resubscribe*
   [{:keys [biff/db biff/fn-whitelist session/uid] event-id :id :as env} {:keys [table] :as query}]
   (let [fn-whitelist (into #{'= 'not= '< '> '<= '>= '== '!=} fn-whitelist)
         {:keys [where id args] :as norm-query} (normalize-query query)]
@@ -237,22 +180,35 @@
                                :event-id event-id
                                :session/uid uid}}))))
 
-; todo dry with crux-resubscribe*
-(defn crux-subscribe*
+; todo dry with resubscribe*
+(defn subscribe*
   [{:keys [biff/db biff/fn-whitelist session/uid] event-id :id :as env} {:keys [table] :as query}]
+  (let [{:keys [where id args] :as norm-query} (normalize-query query)
+        dat-query (cond->
+                      {:find '[(pull ?e [*])]
+                       :where (mapv #(cond->> %
+                                       (attr-clause? %) (into ['?e]))
+                                where)}
+                    args (assoc :args [args]))]
+    (prn :table table :query query
+      :nq norm-query
+      :dq dat-query)
+    (prn :docs (if (some? id)
+                 (some-> (d/pull db '[*] id) vector)
+                 (d/q dat-query db))))
   (let [fn-whitelist (into #{'= 'not= '< '> '<= '>= '== '!=} fn-whitelist)
         {:keys [where id args] :as norm-query} (normalize-query query)]
-    (u/letdelay [fns-authorized (every? #(or (attr-clause? %) (fn-whitelist (ffirst %))) where)
-                 crux-query (cond->
-                              {:find '[doc]
-                               :where (mapv #(cond->> %
-                                               (attr-clause? %) (into ['doc]))
-                                        where)}
+    (u/letdelay [;fns-authorized (every? #(or (attr-clause? %) (fn-whitelist (ffirst %))) where)
+                 fns-authorized (do (prn "TODO: biff.datomic/subscribe* authorize") true)
+                 dat-query (cond-> ;TODO: Only pull allowed and needed attrs
+                               {:find '[(pull ?e [*])]
+                                :where (mapv #(cond->> %
+                                                (attr-clause? %) (into ['?e]))
+                                         where)}
                               args (assoc :args [args]))
                  docs (if (some? id)
-                        (some-> (crux/entity db id) vector)
-                        (map #(crux/entity db (first %))
-                          (crux/q db crux-query)))
+                        (some-> (d/pull db '[*] id) vector)
+                        (d/q dat-query db))
                  authorize-anom (->> docs
                                   (map #(->> {:doc %
                                               :table table
@@ -261,10 +217,7 @@
                                           authorize-read))
                                   (filter u/anomaly?)
                                   first)
-                 changeset (u/map-from
-                             (fn [{:crux.db/keys [id]}]
-                               [table id])
-                             docs)]
+                 changeset (u/map-from #(vector table (:db/id %)) docs)]
       (cond
         (not= query (assoc norm-query :table table)) (u/anom :incorrect "Invalid query format."
                                                        :query query)
@@ -278,25 +231,25 @@
                   :sub-data {:query query
                              :changeset changeset}}))))
 
-(defn crux-subscribe!
-  [{:keys [biff/send-event biff.crux/subscriptions client-id id] :as env} query]
-  (let [{:keys [norm-query query-info sub-data] :as result} (crux-subscribe* env query)]
+(defn subscribe!
+  [{:keys [biff/send-event biff.datomic/subscriptions client-id id] :as env} query]
+  (let [{:keys [norm-query query-info sub-data] :as result} (subscribe* env query)]
     (if-not (u/anomaly? result)
       (do
         (send-event client-id [id sub-data])
         (swap! subscriptions assoc-in [client-id norm-query] query-info))
       result)))
 
-(defn crux-resubscribe!
-  [{:keys [biff.crux/subscriptions session/uid client-id id] :as env}
+(defn resubscribe!
+  [{:keys [biff.datomic/subscriptions session/uid client-id id] :as env}
    {:keys [table] :as query}]
-  (let [{:keys [norm-query query-info] :as result} (crux-resubscribe* env query)]
+  (let [{:keys [norm-query query-info] :as result} (resubscribe* env query)]
     (if-not (u/anomaly? result)
       (swap! subscriptions assoc-in [client-id norm-query] query-info)
       result)))
 
-(defn crux-unsubscribe!
-  [{:keys [biff.crux/subscriptions client-id session/uid]} query]
+(defn unsubscribe!
+  [{:keys [biff.datomic/subscriptions client-id session/uid]} query]
   (swap! subscriptions update client-id dissoc (normalize-query query)))
 
 (defn get-id->doc [{:keys [db-after bypass-auth query id->change] :as env}]
@@ -315,7 +268,7 @@
                   second))))
 
 ; todo fix race conditions for subscribing and receiving updates
-(defn changesets* [{:keys [biff.crux/subscriptions] :as env}]
+(defn changesets* [{:keys [biff.datomic/subscriptions] :as env}]
   ((fn step [{:keys [query->id->doc subscriptions]}]
      (let [[[client-id query->info] & subscriptions] subscriptions
            queries (keys query->info)
@@ -352,17 +305,6 @@
    {:query->id->doc {}
     :subscriptions subscriptions}))
 
-(defn tx-log* [{:keys [node after-tx with-ops]
-                :or {after-tx nil with-ops false}}]
-  (crux/open-tx-log node (some-> after-tx long) with-ops))
-
-(defmacro with-tx-log [[sym opts] & body]
-  `(let [log# (tx-log* ~opts)
-         ~sym (iterator-seq log#)
-         result# (do ~@body)]
-     (.close log#)
-     result#))
-
 (defn time-before [date]
   (-> date
     .toInstant
@@ -376,31 +318,33 @@
     time-before))
 
 (defn get-id->change [{:keys [txes db-before db-after]}]
+  (/ 1 0)
   (->> (for [{:crux.tx.event/keys [tx-events]} txes
              [_ doc-id] tx-events]
          doc-id)
     distinct
     (map (fn [doc-id]
-           (mapv #(crux/entity % doc-id) [db-before db-after])))
+           (mapv #() #_(crux/entity % doc-id) [db-before db-after])))
     distinct
     (remove #(apply = %))
-    (u/map-from #(some :crux.db/id %))))
+    (u/map-from #(some :db/id %))))
 
 (defn changesets [{:keys [client-id] :as env}]
   (-> env
     (assoc :id->change (get-id->change env))
-    (update :biff.crux/subscriptions (fn [xs] (sort-by #(not= client-id (first %)) xs)))
+    (update :biff.datomic/subscriptions (fn [xs] (sort-by #(not= client-id (first %)) xs)))
     changesets*))
 
 (defn trigger-data [{:biff/keys [rules triggers node]
                      :keys [id->change txes] :as env}]
+  (/ 1 0)
   (for [{:keys [crux.tx/tx-time crux.tx.event/tx-events] :as tx} txes
-        :let [db (crux/db node tx-time)
-              db-before (crux/db node (time-before tx-time))]
+        :let [db (/ 1 0) #_(crux/db node tx-time)
+              db-before (/ 1 0 ) #_(crux/db node (time-before tx-time))]
         [tx-op doc-id] tx-events
         :when (#{:crux.tx/put :crux.tx/delete} tx-op)
-        :let [doc (crux/entity db doc-id)
-              doc-before (crux/entity db-before doc-id)
+        :let [doc (/ 1 0) #_(crux/entity db doc-id)
+              doc-before (/ 1 0) #_(crux/entity db-before doc-id)
               doc-op (cond
                        (nil? doc) :delete
                        (nil? doc-before) :create
@@ -427,44 +371,58 @@
         (.printStackTrace e)
         (log :error e "Couldn't run trigger")))))
 
-(defn notify-tx [{:biff/keys [triggers send-event node]
-                  :keys [biff.crux/subscriptions last-tx-id] :as env}]
-  (when-let [txes (not-empty (with-tx-log [log {:node node
-                                                :after-tx @last-tx-id}]
-                               (doall (take 20 log))))]
-    (let [{:crux.tx/keys [tx-id tx-time]} (last txes)
-          {:keys [id->change] :as env} (-> env
-                                         (update :biff.crux/subscriptions deref)
-                                         (assoc
-                                           :txes txes
-                                           :db-before (crux/db node (time-before-txes txes))
-                                           :db-after (crux/db node tx-time))
-                                         (#(assoc % :id->change (get-id->change %))))
-          changesets (changesets env)]
-      (future (u/fix-stdout (run-triggers env)))
-      (doseq [{:keys [client-id query changeset event-id] :as result} changesets]
-        (if (u/anomaly? result)
-          (do
-            (u/pprint result)
-            (swap! subscriptions
-              #(let [subscriptions (update % client-id dissoc query)]
-                 (cond-> subscriptions
-                   (empty? (get subscriptions client-id)) (dissoc client-id))))
-            (send-event client-id [:biff/error (u/anom :forbidden "Query not allowed."
-                                                 :query query)]))
-          (send-event client-id [event-id {:query query
-                                           :changeset changeset}])))
-      (reset! last-tx-id tx-id)
-      true)))
+(defn listener [f]
+  (let [g (fn []
+            (Thread/sleep 1000)
+            (try
+              (f)
+              (catch Exception e
+                (clojure.pprint/pprint e))))]
+    (doto (Thread. g)
+      (.setDaemon true)
+      .start)))
+
+(defn notify-tx [{:biff/keys [triggers send-event db-conn]
+                  :keys [biff.datomic/subscriptions last-tx-id] :as env}]
+  (let [last-t (inc @last-tx-id)]
+    (when-let [txes (not-empty (d/tx-range db-conn {:start (inc last-t)
+                                                    :end (+ 21 last-t)}))]
+      (let [tx-id (:t (last txes))
+            db (d/db db-conn)
+            {:keys [id->change] :as env} (-> env
+                                           (update :biff.datomic/subscriptions deref)
+                                           (assoc
+                                             :txes txes
+                                             :db-before (d/as-of db last-t)
+                                             :db-after (d/as-of db tx-id))
+                                           (#(assoc % :id->change (get-id->change %))))
+            changesets (changesets env)]
+        (future (u/fix-stdout (run-triggers env)))
+        (doseq [{:keys [client-id query changeset event-id] :as result} changesets]
+          (if (u/anomaly? result)
+            (do
+              (u/pprint result)
+              (swap! subscriptions
+                #(let [subscriptions (update % client-id dissoc query)]
+                   (cond-> subscriptions
+                     (empty? (get subscriptions client-id)) (dissoc client-id))))
+              (send-event client-id [:biff/error (u/anom :forbidden "Query not allowed."
+                                                   :query query)]))
+            (send-event client-id [event-id {:query query
+                                             :changeset changeset}])))
+        (reset! last-tx-id tx-id)
+        true))))
 
 (defn wrap-tx [handler]
-  (fn [{:keys [id biff/node] :as env}]
+  (fn [{:keys [id biff/db-conn] :as env}]
+    (prn :id id :?data (:?data env))
     (if (not= id :biff/tx)
       (handler env)
       (let [tx (authorize-tx (set/rename-keys env {:?data :tx}))]
+        (prn :tx tx)
         (if (u/anomaly? tx)
           tx
-          (crux/submit-tx node tx))))))
+          (d/transact db-conn {:tx-data tx}))))))
 
 (defn wrap-sub [handler]
   (fn [{:keys [id biff/send-event client-id session/uid] {:keys [query action]} :?data :as env}]
@@ -481,32 +439,33 @@
                                                   :tmp true})}
                                    :query query}])
 
-                     (= action :subscribe) (crux-subscribe! env query)
-                     (= action :unsubscribe) (crux-unsubscribe! env query)
-                     (= action :resubscribe) (crux-resubscribe! env query)
+                     (= action :subscribe) (subscribe! env query)
+                     (= action :unsubscribe) (unsubscribe! env query)
+                     (= action :resubscribe) (resubscribe! env query)
                      :default (u/anom :incorrect "Invalid action." :action action))]
         (when (u/anomaly? result)
           result)))))
 
-(defn submit-admin-tx [{:biff/keys [node db rules] :as sys} tx]
-  (let [db (or db (crux/db node))
+(defn submit-admin-tx [{:biff/keys [db-conn db rules] :as sys} tx]
+  (let [db (or db (d/db db-conn))
         tx (authorize-tx {:tx tx
                           :biff/db db
                           :biff/rules rules
                           :admin true})
         anom (u/anomaly? tx)]
     (when anom
-      (u/pprint anom))
+      (u/pprint anom)
+      (u/pprint tx))
     (if anom
       tx
-      (crux/submit-tx node tx))))
+      (d/transact db-conn {:tx-data tx}))))
 
 
 ; todo move this to a test file or delete it
 
 (comment
 
-  (u/pprint @(:findka.biff.crux/subscriptions @biff.core/system))
+  (u/pprint @(:findka.biff.datomic/subscriptions @biff.core/system))
 
 
   (crux/entity (crux/db (:findka.biff/node @biff.core/system))
@@ -538,11 +497,11 @@
                     :fns {prep-doc nil
                           authorize-write [:current-time]}}
       authorize-read {:keys [:table :uid :db :doc :query :rules]}
-      crux-subscribe* {:keys [:db :uid :event-id]
+      subscribe* {:keys [:db :uid :event-id]
                        :fns {authorize-read [:table :doc :query]}}
-      crux-subscribe! {:keys [:api-send :subscriptions :client-id]
-                       :fns {crux-subscribe* nil}}
-      crux-unsubscribe! {:keys [:subscriptions :client-id :uid]}
+      subscribe! {:keys [:api-send :subscriptions :client-id]
+                       :fns {subscribe* nil}}
+      unsubscribe! {:keys [:subscriptions :client-id :uid]}
       get-id->doc {:keys [:db-after :query :id->change]
                    :fns {authorize-read [:doc :db]}}
       changesets* {:keys [:subscriptions]
@@ -557,7 +516,7 @@
   {prep-doc [:db :rules],
    get-id->doc [:table :db-after :uid :rules :id->change :query],
    authorize-tx [:db :rules :tx :auth-uid],
-   crux-unsubscribe! [:client-id :uid :subscriptions],
+   unsubscribe! [:client-id :uid :subscriptions],
    changesets* [:db-after :rules :subscriptions :id->change],
    changesets [:db-after :txes :rules :db-before :subscriptions],
    authorize-write [:current-time :db :rules :tx :auth-uid],
@@ -566,9 +525,9 @@
    notify-tx [:client-id :last-tx-id :api-send :node :rules :subscriptions :tx],
    authorize-read [:table :db :uid :rules :query :doc],
    read-auth-fn [:db :doc :auth-uid],
-   crux-subscribe* [:event-id :db :uid :rules],
+   subscribe* [:event-id :db :uid :rules],
    get-id->change [:db-after :txes :db-before],
-   crux-subscribe! [:event-id :client-id :db :uid :api-send :rules :subscriptions]}
+   subscribe! [:event-id :client-id :db :uid :api-send :rules :subscriptions]}
 
 
   (defn tmp-node []
@@ -729,7 +688,7 @@
 
 ;(with-redefs [authorize-read :doc]
 ;  (with-db {}
-;    (crux-subscribe*
+;    (subscribe*
 ;      {:db db
 ;       :doc {:crux.db/id {:a 1 :b 2}
 ;             :foo "hey"}
@@ -742,7 +701,7 @@
 
 (with-redefs [authorize-read :doc]
   (with-db {:foo {:a 1}}
-    (crux-subscribe*
+    (subscribe*
       {:db db
        :uid "some-uid"}
       '{:table :some-table
@@ -752,7 +711,7 @@
 
 (with-redefs [authorize-read :doc]
   (with-db {:foo {:a 1}}
-    (crux-subscribe*
+    (subscribe*
       {:db db
        :uid "some-uid"}
       '{:table :some-table
@@ -760,7 +719,7 @@
 
 (with-redefs [authorize-read :doc]
   (with-db {:foo {:a 1}}
-    (crux-subscribe*
+    (subscribe*
       {:db db
        :uid "some-uid"}
       '{:table :some-table
@@ -770,7 +729,7 @@
   (with-redefs [authorize-read :doc]
     (with-db {:foo {:a 1}
               :bar {:a 1}}
-      (crux-subscribe*
+      (subscribe*
         {:db db
          :uid "some-uid"}
         '{:table :some-table

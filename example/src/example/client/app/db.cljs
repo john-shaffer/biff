@@ -19,22 +19,23 @@
   data (apply merge-with merge (vals sub-data))
 
   uid (get-in data [:uid nil :uid])
-  user-ref {:user/id uid}
   id->users (:users data)
-  self (get id->users user-ref)
+  self (get id->users uid)
   email (:user/email self)
   signed-in (and (some? uid) (not= :signed-out uid))
 
   id->public-users (:public-users data)
-  public-self (get id->public-users {:user.public/id uid})
-  display-name (:display-name public-self)
+  public-self (get id->public-users uid)
+  display-name (:user.public/display-name public-self)
 
   game (->> data
          :games
          vals
-         (filter #(contains? (:users %) uid))
-         first)
-  game-id (:game/id game)
+         (filter (fn [x]
+                   (some #(when (= uid (:db/id %)) %)
+                     (:biff-example.game/users (first x)))))
+         ffirst)
+  game-id (:biff-example.game/id game)
 
   participants (:users game)
   x (:x game)
@@ -51,11 +52,11 @@
              :uid
              (when signed-in
                [{:table :users
-                 :id user-ref}
+                 :id uid}
                 {:table :public-users
-                 :id {:user.public/id uid}}
+                 :id uid}
                 {:table :games
-                 :where [[:users uid]]}])
+                 :where [[:biff-example.game/users uid]]}])
              (for [u (:users game)]
                {:table :public-users
                 :id {:user.public/id u}})]

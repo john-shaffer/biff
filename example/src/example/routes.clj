@@ -1,7 +1,7 @@
 (ns example.routes
   (:require
     [biff.http :as bhttp]
-    [crux.api :as crux]
+    [datomic.client.api :as d]
     [trident.util :as u]
     [ring.middleware.anti-forgery :as anti-forgery]))
 
@@ -13,14 +13,14 @@
 
 (defn whoami [{:keys [session/uid biff/db]}]
   (if (some? uid)
-    {:body (:user/email (crux/entity db {:user/id uid}))
+    {:body (:user/email (/ 1 0)#_(crux/entity db {:user/id uid}))
      :headers/Content-Type "text/plain"}
     {:status 401
      :headers/Content-Type "text/plain"
      :body "Not authorized."}))
 
 (defn whoami2 [{:keys [session/uid biff/db]}]
-  {:body (:user/email (crux/entity db {:user/id uid}))
+  {:body (:user/email (/ 1 0)#_(crux/entity db {:user/id uid}))
    :headers/Content-Type "text/plain"})
 
 (def routes

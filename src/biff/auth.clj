@@ -1,8 +1,8 @@
 (ns biff.auth
   (:require
-    [crux.api :as crux]
+    [datomic.client.api :as d]
     [ring.middleware.anti-forgery :as anti-forgery]
-    [biff.crux :as bcrux]
+    [biff.datomic :as bdat]
     [byte-streams :as bs]
     [crypto.random :as random]
     [trident.util :as u]
@@ -12,13 +12,17 @@
     [byte-transforms :as bt]))
 
 (defn get-key [{:keys [biff/node biff/db k] :as env}]
-  (or (get (crux/entity db :biff.auth/keys) k)
+  (or (ffirst
+        (d/q '[:find ?value
+               :in $ ?key
+               :where
+               [?e :db/ident ?key]
+               [?e :biff.auth.key/value ?value]]
+          db k))
     (doto (bs/to-string (bt/encode (random/bytes 16) :base64))
-      (#(bcrux/submit-admin-tx
+      (#(bdat/submit-admin-tx
           env
-          {[:biff/auth-keys :biff.auth/keys]
-           {:db/merge true
-            k %}})))))
+          [{:db/ident k :biff.auth.key/value %}])))))
 
 (defn jwt-key [env]
   (get-key (assoc env :k :jwt-key)))
@@ -56,7 +60,7 @@
   {:status 302
    :headers/Location location})
 
-(defn signin [{:keys [params/token session biff/db biff/node]
+(defn signin [{:keys [params/token session biff/db biff/db-conn]
                :biff.auth/keys [on-signin on-signin-fail]
                :as env}]
   (if-some [{:keys [email] :as claims}
@@ -64,28 +68,18 @@
               (tjwt/decode {:secret (jwt-key env)
                             :alg :HS256})
               u/catchall)]
-    (let [new-user-ref {:user/id (java.util.UUID/randomUUID)}
-          user (merge
-                 {:crux.db/id new-user-ref
-                  :user/email email}
-                 new-user-ref
-                 (ffirst
-                   (crux/q db
-                     {:find '[e]
-                      :args [{'input-email email}]
-                      :where '[[e :user/email email]
-                               [(biff.auth/email= email input-email)]]
-                      :full-results? true}))
-                 (u/assoc-some
-                   {:last-signed-in (u/now)}
-                   :claims (not-empty (dissoc claims :email :iss :iat :exp))))]
-      (crux/submit-tx node [[:crux.tx/put user]])
+    (let [tx (d/transact db-conn
+               {:tx-data
+                [{:user/email email
+                  :user/last-signed-in (u/now)}]})
+          uid (-> tx :tx-data second .-e)]
+      (prn "TODO: biff.auth/signin handle claims")
       {:status 302
        :headers/Location on-signin
        :cookies/csrf {:path "/"
                       :max-age (* 60 60 24 90)
                       :value (force anti-forgery/*anti-forgery-token*)}
-       :session (assoc session :uid (:user/id user))})
+       :session (assoc session :uid uid)})
     {:status 302
      :headers/Location on-signin-fail}))
 
