@@ -10,7 +10,7 @@
     [expound.alpha :refer [expound]]
     [taoensso.timbre :refer [log spy]]
     [trident.util :as u]))
-
+(defn p [& args] (apply prn args) (last args))
 (defn start-db-conn [client-args db-name]
   (let [client (d/client client-args)]
     (d/create-database client {:db-name db-name})
@@ -22,6 +22,7 @@
 
 (defn authorize-write [{:keys [biff/rules admin] :as env}
                        {:keys [table op] :as doc-tx-data}]
+
   (prn "TODO: biff.datomic/authorize-write")
   doc-tx-data
   #_(if admin
@@ -90,8 +91,8 @@
 
 (defn query-contains? [{:keys [id where args]} doc]
   (if (some? id)
-    (= id (:crux.db/id doc))
-    (let [args (assoc args 'doc (:crux.db/id doc))
+    (= id (:db/id doc))
+    (let [args (assoc args 'doc (:db/id doc))
           where (walk/postwalk #(get args % %) where)
           [attr-clauses rule-clauses] (u/split-by (comp keyword? first) where)
           [binding-clauses constant-clauses] (u/split-by (comp symbol? second) attr-clauses)
@@ -126,6 +127,7 @@
 (defn doc-valid? [{:keys [verbose]
                    [id-spec doc-spec] :specs
                    {:crux.db/keys [id] :as doc} :doc}]
+(prn "TODO: doc-valid?")
   (let [doc (apply dissoc doc
               (cond-> [:crux.db/id]
                 (map? id) (concat (keys id))))
@@ -190,10 +192,10 @@
                                        (attr-clause? %) (into ['?e]))
                                 where)}
                     args (assoc :args [args]))]
-    (prn :table table :query query
+    #_(prn :table table :query query
       :nq norm-query
       :dq dat-query)
-    (prn :docs (if (some? id)
+    #_(prn :docs (if (some? id)
                  (some-> (d/pull db '[*] id) vector)
                  (d/q dat-query db))))
   (let [fn-whitelist (into #{'= 'not= '< '> '<= '>= '== '!=} fn-whitelist)
@@ -284,7 +286,7 @@
                      :let [id->doc (query->id->doc q)
                            anom (->> id->doc
                                   vals
-                                  (filter u/anomaly?)
+                                  (filter #(or (u/anomaly? %) (nil? %)))
                                   first)
                            {:keys [table event-id]} (query->info q)
                            changeset (delay (u/map-keys #(vector table %) id->doc))]
@@ -318,16 +320,12 @@
     time-before))
 
 (defn get-id->change [{:keys [txes db-before db-after]}]
-  (/ 1 0)
-  (->> (for [{:crux.tx.event/keys [tx-events]} txes
-             [_ doc-id] tx-events]
-         doc-id)
+  (->> txes
+    (mapcat (fn [tx]
+              (distinct (map #(.-e %) (:data tx)))))
     distinct
-    (map (fn [doc-id]
-           (mapv #() #_(crux/entity % doc-id) [db-before db-after])))
-    distinct
-    (remove #(apply = %))
-    (u/map-from #(some :db/id %))))
+    (map #(vector % (d/pull db-after '[*] %)))
+    (u/map-from first)))
 
 (defn changesets [{:keys [client-id] :as env}]
   (-> env
@@ -377,7 +375,8 @@
             (try
               (f)
               (catch Exception e
-                (clojure.pprint/pprint e))))]
+                (clojure.pprint/pprint e)))
+            (recur))]
     (doto (Thread. g)
       (.setDaemon true)
       .start)))

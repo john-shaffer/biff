@@ -74,6 +74,7 @@
           (handler event ?data))))))
 
 (defn merge-changeset [db changeset]
+(println changeset)
   (reduce (fn [db [[table id] ent]]
             (if ent
               (assoc-in db [table id] ent)
