@@ -21,12 +21,17 @@
   (:import
     [java.nio.file Paths]))
 
+(defn db [{:keys [biff/db-client biff/node] :as sys}]
+  (case db-client
+    :crux (crux/db node)
+    :datomic ((ns-resolve 'datomic.client.api 'db) node)))
+
 (defn wrap-env [handler {:keys [biff/node] :as sys}]
   (comp handler
     (fn [event-or-request]
       (let [req (:ring-req event-or-request event-or-request)]
         (-> (merge sys event-or-request)
-          (assoc :biff/db (crux/db node))
+          (assoc :biff/db (db sys))
           (merge (u/prepend-keys "session" (get req :session)))
           (merge (u/prepend-keys "params" (get req :params))))))))
 
@@ -47,6 +52,7 @@
     (merge
       {:biff.crux/topology :jdbc
        :biff.crux/storage-dir (str "data/" app-ns "/crux-db")
+       :biff/db-client :crux
        :biff.web/port 8080
        :biff.static/root root
        :biff.static/resource-root (str "www/" app-ns)
@@ -81,6 +87,19 @@
       (assoc :biff/node node)
       (update :sys/stop conj #(.close node)))))
 
+(defn start-datomic [{:biff.datomic/keys [client db-name] :as sys}]
+  (let [node ((ns-resolve 'biff.datomic 'start-node) client db-name)]
+    (-> sys
+      (assoc :biff/node node)
+      (update :sys/stop conj #(.close node)))))
+
+(defn start-node [sys]
+  (case (:biff/db-client sys)
+    :crux (start-crux sys)
+    :datomic (do
+               (require 'biff.datomic)
+               (start-datomic sys))))
+
 (defn start-sente [sys]
   (let [{:keys [ch-recv send-fn connected-uids
                 ajax-post-fn ajax-get-or-ws-handshake-fn]}
@@ -108,22 +127,10 @@
         :biff.sente/ch-recv ch-recv
         :biff.sente/connected-uids connected-uids))))
 
-(defn start-tx-listener [{:keys [biff/node biff.sente/connected-uids] :as sys}]
-  (let [last-tx-id (bcrux/with-tx-log [log {:node node}]
-                     (atom (:crux.tx/tx-id (last log))))
-        subscriptions (atom {})
-        sys (assoc sys :biff.crux/subscriptions subscriptions)
-        notify-tx-opts (-> sys
-                         (merge (u/select-ns-as sys 'biff nil))
-                         (assoc :last-tx-id last-tx-id))
-        listener (crux/listen node {:crux/event-type :crux/indexed-tx}
-                   (fn [ev] (bcrux/notify-tx notify-tx-opts)))]
-    (add-watch connected-uids ::rm-subs
-      (fn [_ _ old-uids new-uids]
-        (let [disconnected (set/difference (:any old-uids) (:any new-uids))]
-          (when (not-empty disconnected)
-            (apply swap! subscriptions dissoc disconnected)))))
-    (update sys :sys/stop conj #(.close listener))))
+(defn start-tx-listener [sys]
+  (case (:biff/db-client sys)
+    :crux (bcrux/start-tx-listener sys)
+    :datomic ((ns-resolve 'biff.datomic 'start-tx-listener) sys)))
 
 (defn wrap-event-handler [handler]
   (fn [{:keys [?reply-fn] :as event}]
@@ -136,16 +143,20 @@
         (when ?reply-fn
           (?reply-fn response))))))
 
-(defn start-event-router [{:keys [biff.sente/ch-recv biff/event-handler]
+(defn start-event-router [{:keys [biff.sente/ch-recv biff/db-client biff/event-handler]
                            :or {event-handler (constantly nil)} :as sys}]
-  (update sys :sys/stop conj
-    (sente/start-server-chsk-router! ch-recv
-      (-> event-handler
-        bcrux/wrap-sub
-        bcrux/wrap-tx
-        (wrap-env sys)
-        wrap-event-handler)
-      {:simple-auto-threading? true})))
+  (let [[wrap-sub wrap-tx] (case db-client
+                             :crux [bcrux/wrap-sub bcrux/wrap-tx]
+                             :datomic [(ns-resolve 'biff.datomic 'wrap-sub)
+                                       (ns-resolve 'biff.datomic 'wrap-tx)])]
+    (update sys :sys/stop conj
+      (sente/start-server-chsk-router! ch-recv
+        (-> event-handler
+          wrap-sub
+          wrap-tx
+          (wrap-env sys)
+          wrap-event-handler)
+        {:simple-auto-threading? true}))))
 
 (defn set-auth-route [sys]
   (update sys :biff/routes conj (auth/route sys)))
@@ -157,7 +168,7 @@
                                         not-found-path] :as sys}]
   (let [cookie-key (bt/decode (auth/get-key (assoc sys
                                               :k :cookie-key
-                                              :biff/db (crux/db node)))
+                                              :biff/db (db sys)))
                      :base64)
         session-store (cookie/cookie-store {:key cookie-key})
         handler (http/make-handler
@@ -206,7 +217,7 @@
     (let [new-sys (-> sys
                     (set-defaults app-ns)
                     check-config
-                    start-crux
+                    start-node
                     start-sente
                     start-tx-listener
                     start-event-router
