@@ -88,10 +88,8 @@
       (update :sys/stop conj #(.close node)))))
 
 (defn start-datomic [{:biff.datomic/keys [client db-name] :as sys}]
-  (let [node ((ns-resolve 'biff.datomic 'start-node) client db-name)]
-    (-> sys
-      (assoc :biff/node node)
-      (update :sys/stop conj #(.close node)))))
+  (assoc sys :biff/node
+    ((ns-resolve 'biff.datomic 'start-node) client db-name)))
 
 (defn start-node [sys]
   (case (:biff/db-client sys)
