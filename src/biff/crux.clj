@@ -530,3 +530,20 @@
     (when (u/anomaly? tx)
       (throw (ex-info "Invalid transaction." tx)))
     (crux/submit-tx node tx)))
+
+(defn start-tx-listener [{:keys [biff/node biff.sente/connected-uids] :as sys}]
+  (let [last-tx-id (with-tx-log [log {:node node}]
+                     (atom (:crux.tx/tx-id (last log))))
+        subscriptions (atom {})
+        sys (assoc sys :biff.crux/subscriptions subscriptions)
+        notify-tx-opts (-> sys
+                         (merge (u/select-ns-as sys 'biff nil))
+                         (assoc :last-tx-id last-tx-id))
+        listener (crux/listen node {:crux/event-type :crux/indexed-tx}
+                   (fn [ev] (notify-tx notify-tx-opts)))]
+    (add-watch connected-uids ::rm-subs
+      (fn [_ _ old-uids new-uids]
+        (let [disconnected (set/difference (:any old-uids) (:any new-uids))]
+          (when (not-empty disconnected)
+            (apply swap! subscriptions dissoc disconnected)))))
+    (update sys :sys/stop conj #(.close listener))))
