@@ -23,10 +23,8 @@
               (put! ch (if response response ::no-response))))))
       ch)))
 
-(defn wrap-handler [handler {:keys [verbose subscriptions api-send ready]}]
+(defn wrap-handler [handler {:keys [subscriptions api-send ready]}]
   (fn [{:keys [id ?data] :as event}]
-    (when (and verbose (= id :chsk/recv))
-      (u/pprint ?data))
     (when (= id :chsk/state)
       (let [[old-state new-state] ?data]
         (when (:first-open? new-state)
@@ -36,8 +34,6 @@
           (doseq [[provider query] @subscriptions]
             (api-send [provider {:action :resubscribe
                                  :query query}])))))
-
-    ;(u/pprint event)
     (handler event)))
 
 (defn csrf []
@@ -66,7 +62,6 @@
     (when (= id :chsk/recv)
       (let [[id ?data] ?data
             sub-channels @sub-channels]
-        ;(u/pprint [:got-message id ?data])
         (if-some [ch (some-> sub-channels
                        (get id)
                        (get (:query ?data)))]
@@ -104,28 +99,51 @@
     (add-watch sub-atom ::maintain-subscriptions watch)
     (watch nil nil #{} @sub-atom)))
 
+(defn merge-subscription-results!
+  "Continually merge results from subscription into sub-data-atom. Returns a channel
+  that delivers sub-channel after the first result has been merged."
+  [{:keys [sub-data-atom merge-result sub-key sub-channel]}]
+  (go
+    (let [merge! #(swap! sub-data-atom update sub-key merge-result %)]
+      (merge! (<! sub-channel))
+      (go-loop []
+        (if-some [result (<! sub-channel)]
+          (do
+            (merge! result)
+            (recur))
+          (swap! sub-data-atom dissoc sub-key)))
+      sub-channel)))
+
 (defn init-sub [{:keys [verbose sub-data subscriptions handler url]
                  :or {url "/api/chsk"
                       handler (constantly nil)}}]
   (let [sub-channels (atom {})
         handler (wrap-sub handler sub-channels)
         {:keys [api-send] :as env} (init-sente {:handler handler
-                                                :verbose verbose
                                                 :subscriptions subscriptions
                                                 :url url})]
     (maintain-subscriptions subscriptions
       (fn [[provider query]]
-        (let [ch (chan)]
+        (let [ch (chan)
+              merge-changeset' (if verbose
+                                 (fn [db changeset]
+                                   (u/pprint [:got-query-results [provider query] changeset])
+                                   (merge-changeset db changeset))
+                                 merge-changeset)]
+          (when verbose
+            (u/pprint [:subscribed-to [provider query]]))
           (swap! sub-channels assoc-in [provider query] ch)
           (api-send [provider {:action :subscribe
                                :query query}])
           (go
-            (<! (u/merge-subscription-results!
+            (<! (merge-subscription-results!
                   {:sub-data-atom sub-data
-                   :merge-result merge-changeset
+                   :merge-result merge-changeset'
                    :sub-key [provider query]
                    :sub-channel ch}))
             (fn []
+              (when verbose
+                (u/pprint [:unsubscribed-to [provider query]]))
               (swap! sub-channels update provider dissoc query)
               (close! ch)
               (api-send [provider {:action :unsubscribe
