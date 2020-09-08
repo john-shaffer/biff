@@ -24,8 +24,22 @@
 (defn wrap-sub [handler]
   handler)
 
+(defn authorize-tx [{:keys [tx current-time] :as env
+                     :or {current-time (java.util.Date.)}}]
+  tx)
+
 (defn wrap-tx [handler]
   handler)
+
+(defn submit-tx [{:biff/keys [node db rules] :as sys} tx]
+  (let [db (or db (d/db node))
+        tx (authorize-tx {:tx tx
+                          :biff/db db
+                          :biff/rules rules
+                          :admin true})]
+    (when (u/anomaly? tx)
+      (throw (ex-info "Invalid transaction." tx)))
+    (d/transact node {:tx-data tx})))
 
 (defn start-tx-listener [{:keys [biff/node biff.sente/connected-uids] :as sys}]
   sys)

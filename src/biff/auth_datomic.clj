@@ -20,7 +20,7 @@
                [?e :biff.auth.key/value ?value]]
           db k))
     (doto (bs/to-string (bt/encode (random/bytes 16) :base64))
-      (#(bdat/submit-admin-tx
+      (#(bdat/submit-tx
           env
           [{:db/ident k :biff.auth.key/value %}])))))
 
@@ -80,38 +80,6 @@
                       :max-age (* 60 60 24 90)
                       :value (force anti-forgery/*anti-forgery-token*)}
        :session (assoc session :uid uid)})
-    {:status 302
-     :headers/Location on-signin-fail}))
-(defn signin [{:keys [params/token session biff/db biff/node]
-               :biff.auth/keys [on-signin on-signin-fail]
-               :as env}]
-  (if-some [{:keys [email] :as claims}
-            (-> token
-              (tjwt/decode {:secret (jwt-key env)
-                            :alg :HS256})
-              u/catchall)]
-    (let [new-user-ref {:user/id (java.util.UUID/randomUUID)}
-          user (merge
-                 {:crux.db/id new-user-ref
-                  :user/email email}
-                 new-user-ref
-                 (ffirst
-                   (crux/q db
-                     {:find '[e]
-                      :args [{'input-email email}]
-                      :where '[[e :user/email email]
-                               [(biff.auth/email= email input-email)]]
-                      :full-results? true}))
-                 (u/assoc-some
-                   {:last-signed-in (u/now)}
-                   :claims (not-empty (dissoc claims :email :iss :iat :exp))))]
-      (crux/submit-tx node [[:crux.tx/put user]])
-      {:status 302
-       :headers/Location on-signin
-       :cookies/csrf {:path "/"
-                      :max-age (* 60 60 24 90)
-                      :value (force anti-forgery/*anti-forgery-token*)}
-       :session (assoc session :uid (:user/id user))})
     {:status 302
      :headers/Location on-signin-fail}))
 

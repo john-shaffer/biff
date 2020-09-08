@@ -156,14 +156,22 @@
         {:simple-auto-threading? true}))))
 
 (defn set-auth-route [sys]
-  (update sys :biff/routes conj (auth/route sys)))
+  (let [route-fn (case (:biff/db-client sys)
+                   :crux auth/route
+                   :datomic (requiring-resolve 'biff.auth-datomic/route))]
+    (update sys :biff/routes conj (route-fn sys))))
+
+(defn auth-get-key [sys]
+  (case (:biff/db-client sys)
+    :crux auth/get-key
+    :datomic ((requiring-resolve 'biff.auth-datomic/get-key) sys)))
 
 (defn set-handler [{:biff/keys [routes host node]
                     :biff.handler/keys [roots
                                         secure-defaults
                                         spa-path
                                         not-found-path] :as sys}]
-  (let [cookie-key (bt/decode (auth/get-key (assoc sys
+  (let [cookie-key (bt/decode (auth-get-key (assoc sys
                                               :k :cookie-key
                                               :biff/db (db sys)))
                      :base64)
