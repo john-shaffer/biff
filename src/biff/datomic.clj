@@ -29,7 +29,13 @@
   tx)
 
 (defn wrap-tx [handler]
-  handler)
+  (fn [{:keys [id biff/node] :as env}]
+    (if (not= id :biff/tx)
+      (handler env)
+      (let [tx (authorize-tx (set/rename-keys env {:?data :tx}))]
+        (if (u/anomaly? tx)
+          tx
+          (d/transact node {:tx-data tx}))))))
 
 (defn submit-tx [{:biff/keys [node db rules] :as sys} tx]
   (let [db (or db (d/db node))
