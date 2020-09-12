@@ -24,7 +24,7 @@
 (defn db [{:keys [biff/db-client biff/node] :as sys}]
   (case db-client
     :crux (crux/db node)
-    :datomic ((ns-resolve 'datomic.client.api 'db) node)))
+    :datomic ((requiring-resolve 'datomic.client.api/db) node)))
 
 (defn wrap-env [handler {:keys [biff/node] :as sys}]
   (comp handler
@@ -88,7 +88,7 @@
 
 (defn start-datomic [{:biff.datomic/keys [client db-name] :as sys}]
   (assoc sys :biff/node
-    ((ns-resolve 'biff.datomic 'start-node) client db-name)))
+    ((requiring-resolve 'biff.datomic/start-node) client db-name)))
 
 (defn start-node [sys]
   (case (:biff/db-client sys)
@@ -127,7 +127,7 @@
 (defn start-tx-listener [sys]
   (case (:biff/db-client sys)
     :crux (bcrux/start-tx-listener sys)
-    :datomic ((ns-resolve 'biff.datomic 'start-tx-listener) sys)))
+    :datomic ((requiring-resolve 'biff.datomic/start-tx-listener) sys)))
 
 (defn wrap-event-handler [handler]
   (fn [{:keys [?reply-fn] :as event}]
@@ -144,8 +144,8 @@
                            :or {event-handler (constantly nil)} :as sys}]
   (let [[wrap-sub wrap-tx] (case db-client
                              :crux [bcrux/wrap-sub bcrux/wrap-tx]
-                             :datomic [(ns-resolve 'biff.datomic 'wrap-sub)
-                                       (ns-resolve 'biff.datomic 'wrap-tx)])]
+                             :datomic [(requiring-resolve 'biff.datomic/wrap-sub)
+                                       (requiring-resolve 'biff.datomic/wrap-tx)])]
     (update sys :sys/stop conj
       (sente/start-server-chsk-router! ch-recv
         (-> event-handler
